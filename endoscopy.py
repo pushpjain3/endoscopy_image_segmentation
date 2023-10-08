@@ -99,6 +99,9 @@ num_classes = 3  # Number of classes in your dataset
 
 images, masks = load_and_preprocess_data(dataset_dir, input_shape)
 
+
+
+
 dataset = []
 
 for image, mask in zip(images, masks):
@@ -149,12 +152,7 @@ test_dataset = test_dataset.map(load_image_test, num_parallel_calls=tf.data.AUTO
 
 
 
-BATCH_SIZE = 4
-BUFFER_SIZE = 1000
-train_batches = train_dataset.cache().shuffle(BUFFER_SIZE).batch(BATCH_SIZE).repeat()
-train_batches = train_batches.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
-validation_batches = test_dataset.take(3000).batch(BATCH_SIZE)
-test_batches = test_dataset.skip(3000).take(669).batch(BATCH_SIZE)
+
 
 
 
@@ -173,84 +171,109 @@ random_index = np.random.choice(sample_batch[0].shape[0])
 sample_image, sample_mask = sample_batch[0][random_index], sample_batch[1][random_index]
 display([sample_image, sample_mask])
 
+"""
+RGB to HEX: (Hexadecimel --> base 16)
+This number divided by sixteen (integer division; ignoring any remainder) gives 
+the first hexadecimal digit (between 0 and F, where the letters A to F represent 
+the numbers 10 to 15). The remainder gives the second hexadecimal digit. 
+0-9 --> 0-9
+10-15 --> A-F
 
-def double_conv_block(x, n_filters):
-   # Conv2D then ReLU activation
-   x = layers.Conv2D(n_filters, 3, padding = "same", activation = "relu", kernel_initializer = "he_normal")(x)
-   # Conv2D then ReLU activation
-   x = layers.Conv2D(n_filters, 3, padding = "same", activation = "relu", kernel_initializer = "he_normal")(x)
-   return x
+Example: RGB --> R=201, G=, B=
+
+R = 201/16 = 12 with remainder of 9. So hex code for R is C9 (remember C=12)
+
+Calculating RGB from HEX: #3C1098
+3C = 3*16 + 12 = 60
+10 = 1*16 + 0 = 16
+98 = 9*16 + 8 = 152
+
+"""
+#Convert HEX to RGB array
+# Try the following to understand how python handles hex values...
+a=int('3C', 16)  #3C with base 16. Should return 60. 
+print(a)
+#Do the same for all RGB channels in each hex code to convert to RGB
+Building = '#3C1098'.lstrip('#')
+Building = np.array(tuple(int(Building[i:i+2], 16) for i in (0, 2, 4))) # 60, 16, 152
+
+Land = '#8429F6'.lstrip('#')
+Land = np.array(tuple(int(Land[i:i+2], 16) for i in (0, 2, 4))) #132, 41, 246
+
+Road = '#6EC1E4'.lstrip('#') 
+Road = np.array(tuple(int(Road[i:i+2], 16) for i in (0, 2, 4))) #110, 193, 228
+
+Vegetation =  'FEDD3A'.lstrip('#') 
+Vegetation = np.array(tuple(int(Vegetation[i:i+2], 16) for i in (0, 2, 4))) #254, 221, 58
+
+Water = 'E2A929'.lstrip('#') 
+Water = np.array(tuple(int(Water[i:i+2], 16) for i in (0, 2, 4))) #226, 169, 41
+
+Unlabeled = '#9B9B9B'.lstrip('#') 
+Unlabeled = np.array(tuple(int(Unlabeled[i:i+2], 16) for i in (0, 2, 4))) #155, 155, 155
+
+label = single_patch_mask
+
+# Now replace RGB to integer values to be used as labels.
+#Find pixels with combination of RGB for the above defined arrays...
+#if matches then replace all values in that pixel with a specific integer
+def rgb_to_2D_label(label):
+    """
+    Suply our labale masks as input in RGB format. 
+    Replace pixels with specific RGB values ...
+    """
+    label_seg = np.zeros(label.shape,dtype=np.uint8)
+    label_seg [np.all(label == Building,axis=-1)] = 0
+    label_seg [np.all(label==Land,axis=-1)] = 1
+    label_seg [np.all(label==Road,axis=-1)] = 2
+    label_seg [np.all(label==Vegetation,axis=-1)] = 3
+    label_seg [np.all(label==Water,axis=-1)] = 4
+    label_seg [np.all(label==Unlabeled,axis=-1)] = 5
+    
+    label_seg = label_seg[:,:,0]  #Just take the first channel, no need for all 3 channels
+    
+    return label_seg
+
+labels = []
+for i in range(mask_dataset.shape[0]):
+    label = rgb_to_2D_label(mask_dataset[i])
+    labels.append(label)    
+
+labels = np.array(labels)   
+labels = np.expand_dims(labels, axis=3)
+ 
+
+print("Unique labels in label dataset are: ", np.unique(labels))
 
 
-def downsample_block(x, n_filters):
-   f = double_conv_block(x, n_filters)
-   p = layers.MaxPool2D(2)(f)
-   p = layers.Dropout(0.3)(p)
-   return f, p
+n_classes = len(np.unique(labels))
+from keras.utils import to_categorical
+labels_cat = to_categorical(labels, num_classes=n_classes)
 
-def upsample_block(x, conv_features, n_filters):
-   # upsample
-   x = layers.Conv2DTranspose(n_filters, 3, 2, padding="same")(x)
-   # concatenate
-   x = layers.concatenate([x, conv_features])
-   # dropout
-   x = layers.Dropout(0.3)(x)
-   # Conv2D twice with ReLU activation
-   x = double_conv_block(x, n_filters)
-   return x
 
-def build_unet_model():
-       inputs = layers.Input(shape=(128,128,3))
-       # encoder: contracting path - downsample
-       # 1 - downsample
-       f1, p1 = downsample_block(inputs, 64)
-       # 2 - downsample
-       f2, p2 = downsample_block(p1, 128)
-       # 3 - downsample
-       f3, p3 = downsample_block(p2, 256)
-       # 4 - downsample
-       f4, p4 = downsample_block(p3, 512)
-       
-       # 5 - bottleneck
-       bottleneck = double_conv_block(p4, 1024)
-       
-       # decoder: expanding path - upsample
-       # 6 - upsample
-       u6 = upsample_block(bottleneck, f4, 512)
-       # 7 - upsample
-       u7 = upsample_block(u6, f3, 256)
-       # 8 - upsample
-       u8 = upsample_block(u7, f2, 128)
-       # 9 - upsample
-       u9 = upsample_block(u8, f1, 64)
 
-       # outputs
-       outputs = layers.Conv2D(3, 1, padding="same", activation = "softmax")(u9)
-       # unet model with Keras Functional API
-       unet_model = tf.keras.Model(inputs, outputs, name="U-Net")
-       return unet_model
    
-unet_model = build_unet_model()
-unet_model.summary()
-dot_img_file = '/tmp/model_1.png'
+# unet_model = build_unet_model()
+# unet_model.summary()
+# dot_img_file = '/tmp/model_1.png'
 
-tf.keras.utils.plot_model(unet_model, to_file=dot_img_file, show_shapes=True)
-
-
-unet_model.compile(optimizer=tf.keras.optimizers.Adam(),
-                  loss="sparse_categorical_crossentropy",
-                  metrics="accuracy")
+# tf.keras.utils.plot_model(unet_model, to_file=dot_img_file, show_shapes=True)
 
 
-NUM_EPOCHS = 20
-TRAIN_LENGTH = 64
-STEPS_PER_EPOCH = TRAIN_LENGTH // BATCH_SIZE
-VAL_SUBSPLITS = 5
-TEST_LENTH = 16
-VALIDATION_STEPS = TEST_LENTH // BATCH_SIZE // VAL_SUBSPLITS
-model_history = unet_model.fit(train_batches,
-                              epochs=NUM_EPOCHS,
-                              steps_per_epoch=STEPS_PER_EPOCH,
-                              validation_steps=VALIDATION_STEPS,
-                              validation_data=test_batches)
+# unet_model.compile(optimizer=tf.keras.optimizers.Adam(),
+#                   loss="sparse_categorical_crossentropy",
+#                   metrics="accuracy")
+
+
+# NUM_EPOCHS = 20
+# TRAIN_LENGTH = 64
+# STEPS_PER_EPOCH = TRAIN_LENGTH // BATCH_SIZE
+# VAL_SUBSPLITS = 5
+# TEST_LENTH = 16
+# VALIDATION_STEPS = TEST_LENTH // BATCH_SIZE // VAL_SUBSPLITS
+# model_history = unet_model.fit(train_batches,
+#                               epochs=NUM_EPOCHS,
+#                               steps_per_epoch=STEPS_PER_EPOCH,
+#                               validation_steps=VALIDATION_STEPS,
+#                               validation_data=test_batches)
 
